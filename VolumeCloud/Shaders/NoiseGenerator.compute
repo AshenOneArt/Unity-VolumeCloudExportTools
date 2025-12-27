@@ -1,0 +1,285 @@
+// 体积云3D噪声生成 ComputeShader
+// 生成多通道3D纹理：R=Base Shape, G=Detail, B/A=预留
+
+#pragma kernel GenerateCloudNoise
+
+// 输出纹理
+RWTexture3D<float4> Result;
+
+// 噪声参数
+int Resolution;
+
+// Base Shape参数 (R通道)
+float BaseFrequency;
+int BaseOctaves;
+float BasePersistence;
+
+float BaseWorleyScale;
+float BaseCoverage;
+
+// Detail参数 (G通道)
+float DetailFrequency;
+int DetailOctaves;
+float DetailPersistence;
+
+// Worley参数
+int WorleyCellCount;
+
+// 随机数生成
+float hash(float3 p)
+{
+    p = frac(p * float3(443.897, 441.423, 437.195));
+    p += dot(p, p.yzx + 19.19);
+    return frac((p.x + p.y) * p.z);
+}
+
+float hash1D(float n)
+{
+    return frac(sin(n) * 43758.5453123);
+}
+
+float3 hash3D(float3 p)
+{
+    return float3(
+        hash(p),
+        hash(p + float3(1.0, 2.0, 3.0)),
+        hash(p + float3(4.0, 5.0, 6.0))
+    );
+}
+
+// 安全的周期性取模函数（确保结果总是正数）
+float mod_periodic(float x, float period)
+{
+    float result = fmod(x, period);
+    return result < 0.0 ? result + period : result;
+}
+
+// Perlin Noise 3D实现
+float3 perlinGradient(float3 p)
+{
+    // 为每个网格点生成一个伪随机梯度向量
+    float3 h = float3(
+        hash(p),
+        hash(p + float3(31.416, 58.965, 27.183)),
+        hash(p + float3(14.142, 17.320, 22.360))
+    );
+    
+    // 归一化到球面
+    return normalize(h * 2.0 - 1.0);
+}
+
+// 周期性Perlin Noise（在XZ方向上可平铺）
+//妈的，都不知道在写些什么东西，反正照着AI抄的
+float perlinNoise3DTileable(float3 p, float period)
+{
+    float3 pi = floor(p);
+    float3 pf = p - pi; // 使用减法替代 frac，更精确
+    
+    // 5次平滑插值（比3次更圆润）
+    float3 u = pf * pf * pf * (pf * (pf * 6.0 - 15.0) + 10.0);
+    
+    // 在XZ方向上应用周期性（Y方向不周期）
+    // 使用安全的取模函数确保正确的周期性
+    float3 pi000 = float3(mod_periodic(pi.x, period), pi.y, mod_periodic(pi.z, period));
+    float3 pi001 = float3(mod_periodic(pi.x, period), pi.y, mod_periodic(pi.z + 1.0, period));
+    float3 pi010 = float3(mod_periodic(pi.x, period), pi.y + 1.0, mod_periodic(pi.z, period));
+    float3 pi011 = float3(mod_periodic(pi.x, period), pi.y + 1.0, mod_periodic(pi.z + 1.0, period));
+    float3 pi100 = float3(mod_periodic(pi.x + 1.0, period), pi.y, mod_periodic(pi.z, period));
+    float3 pi101 = float3(mod_periodic(pi.x + 1.0, period), pi.y, mod_periodic(pi.z + 1.0, period));
+    float3 pi110 = float3(mod_periodic(pi.x + 1.0, period), pi.y + 1.0, mod_periodic(pi.z, period));
+    float3 pi111 = float3(mod_periodic(pi.x + 1.0, period), pi.y + 1.0, mod_periodic(pi.z + 1.0, period));
+    
+    // 计算8个角的梯度贡献
+    float n000 = dot(perlinGradient(pi000), pf - float3(0, 0, 0));
+    float n001 = dot(perlinGradient(pi001), pf - float3(0, 0, 1));
+    float n010 = dot(perlinGradient(pi010), pf - float3(0, 1, 0));
+    float n011 = dot(perlinGradient(pi011), pf - float3(0, 1, 1));
+    float n100 = dot(perlinGradient(pi100), pf - float3(1, 0, 0));
+    float n101 = dot(perlinGradient(pi101), pf - float3(1, 0, 1));
+    float n110 = dot(perlinGradient(pi110), pf - float3(1, 1, 0));
+    float n111 = dot(perlinGradient(pi111), pf - float3(1, 1, 1));
+    
+    // 三线性插值
+    float nx00 = lerp(n000, n100, u.x);
+    float nx01 = lerp(n001, n101, u.x);
+    float nx10 = lerp(n010, n110, u.x);
+    float nx11 = lerp(n011, n111, u.x);
+    
+    float nxy0 = lerp(nx00, nx10, u.y);
+    float nxy1 = lerp(nx01, nx11, u.y);
+    
+    float result = lerp(nxy0, nxy1, u.z);
+    
+    // 映射到[0, 1]范围
+    return result * 0.5 + 0.5;
+}
+
+
+// FBM (Fractal Brownian Motion) for Perlin - 周期性版本
+// p: 归一化坐标 [0, 1]
+// baseFrequency: 基础频率（控制细节程度）
+// octaves: 八度数
+// persistence: 持续度
+//这玩意也不知道在写些什么东西，反正最后对了
+float perlinFBMTileable(float3 p, float baseFrequency, int octaves, float persistence)
+{
+    float total = 0.0;
+    float frequency = 1.0;
+    float amplitude = 1.0;
+    float maxValue = 0.0;
+    
+    for (int i = 0; i < octaves; i++)
+    {
+        // 周期随频率缩放，保证在[0,1]范围内只有一个完整周期
+        // 采样位置: p * baseFrequency * frequency
+        // 周期: baseFrequency * frequency
+        // 这样在[0,1]的uvw空间中，始终保持无缝平铺
+        total += perlinNoise3DTileable(p * baseFrequency * frequency, baseFrequency * frequency) * amplitude;
+        maxValue += amplitude;
+        amplitude *= persistence;
+        frequency *= 2.0;
+    }
+    
+    return total / maxValue;
+}
+
+
+// Worley Noise (Cellular) 3D实现 - 周期性版本
+// p: 归一化坐标 [0, 1]
+// period: 周期大小（在XZ方向上）
+// cellCount: 在一个周期内的单元格数量
+//终于有一个能看懂的了
+float worleyNoise3DTileable(float3 p, float period, int cellCount)
+{
+    // 计算实际的单元格总数
+    float totalCells = period * cellCount;
+    float3 scaledP = p * totalCells;
+    float3 cellPos = floor(scaledP);
+    float3 localPos = scaledP - cellPos; // 使用减法替代 frac
+    
+    float minDist = 1.0;
+    
+    // 检查周围的27个cell
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                float3 neighborCell = cellPos + float3(x, y, z);
+                
+                // 在XZ方向应用周期性（wrap到totalCells范围内）
+                float3 wrappedCell = float3(
+                    mod_periodic(neighborCell.x, totalCells),
+                    neighborCell.y,
+                    mod_periodic(neighborCell.z, totalCells)
+                );
+                
+                float3 randomPoint = hash3D(wrappedCell);
+                float3 pointPos = float3(x, y, z) + randomPoint;
+                float3 diff = pointPos - localPos;
+                float dist = length(diff);
+                minDist = min(minDist, dist);
+            }
+        }
+    }
+    
+    return minDist;
+}
+
+// Worley Noise (Cellular) 3D实现
+float worleyNoise3D(float3 p, int cellCount)
+{
+    float3 scaledP = p * cellCount;
+    float3 cellPos = floor(scaledP);
+    float3 localPos = frac(scaledP);
+    
+    float minDist = 1.0;
+    
+    // 检查周围的27个cell
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            for (int z = -1; z <= 1; z++)
+            {
+                float3 neighborCell = cellPos + float3(x, y, z);
+                float3 randomPoint = hash3D(neighborCell);
+                float3 pointPos = float3(x, y, z) + randomPoint;
+                float3 diff = pointPos - localPos;
+                float dist = length(diff);
+                minDist = min(minDist, dist);
+            }
+        }
+    }
+    
+    return minDist;
+}
+
+// FBM for Worley - 周期性版本
+// p: 归一化坐标 [0, 1]
+// baseFrequency: 基础频率（控制细节程度）
+// cellCount: 基础单元格数量
+// octaves: 八度数
+// persistence: 持续度
+float worleyFBMTileable(float3 p, float baseFrequency, int cellCount, int octaves, float persistence)
+{
+    float total = 0.0;
+    float amplitude = 1.0;
+    float maxValue = 0.0;
+    float frequency = 1.0;
+    
+    for (int i = 0; i < octaves; i++)
+    {
+        // 周期随频率缩放，保证在[0,1]范围内只有一个完整周期
+        float currentPeriod = baseFrequency * frequency;
+        total += worleyNoise3DTileable(p, currentPeriod, cellCount) * amplitude;
+        maxValue += amplitude;
+        amplitude *= persistence;
+        frequency *= 2.0;
+    }
+    
+    return total / maxValue;
+}
+
+// 通用的重映射函数
+float Remap(float value, float originalMin, float originalMax, float newMin, float newMax) {
+    return newMin + (((value - originalMin) / (originalMax - originalMin)) * (newMax - newMin));
+}
+//基本都是照着AI抄的
+[numthreads(8, 8, 8)]
+void GenerateCloudNoise(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)Resolution || id.y >= (uint)Resolution || id.z >= (uint)Resolution)
+        return;
+    
+    // 归一化坐标 [0, 1]
+    float3 uvw = float3(id + 0.5) / float(Resolution);
+    
+    // ===== R通道: Base Shape (Perlin-Worley混合) - 四方连续 =====
+    //照着AI抄的
+    float perlin = perlinFBMTileable(uvw, BaseFrequency, BaseOctaves, BasePersistence);
+    
+    // Worley: XZ方向保持原始uvw以维持周期性，Y方向可以单独缩放（Y不需要周期）
+    // BaseWorleyScale 通过频率参数调整，而不是直接缩放uvw
+    //照着AI抄的
+    float worleyBase = worleyFBMTileable(uvw, BaseFrequency * BaseWorleyScale, WorleyCellCount, BaseOctaves, BasePersistence);
+    
+    //地平线的混合perlin worley 混合
+    float baseShape = Remap(perlin, 0.0, 1.0, saturate(1 - worleyBase), 1.0);
+    baseShape = Remap(baseShape, 1.0 - BaseCoverage, 1.0, 0.0, 1.0 );
+    //baseShape = perlin;
+    baseShape = saturate(baseShape);
+    
+    // ===== G通道: Detail (多层Worley FBM) - 四方连续 =====
+    float detail = worleyFBMTileable(uvw, DetailFrequency, WorleyCellCount, DetailOctaves, DetailPersistence);
+    detail = saturate(detail);
+    
+    // ===== B/A通道: 预留 =====
+    float channel3 = 0.0;
+    float channel4 = 0.0;
+    
+    // 输出到纹理
+    Result[id] = float4(baseShape, detail, channel3, channel4);
+}
+
