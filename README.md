@@ -10,6 +10,20 @@ A lightweight, robust Unity Editor tool for generating, previewing, and exportin
 
 ---
 
+## Compatibility / 版本兼容性
+
+* **Verified Environment (已验证环境):**
+    * **Unity Version:** 2022.3.62f1
+    * **Graphics API:** DirectX 11
+    * **Pipeline:** HDRP (High Definition Render Pipeline)
+        *(Note: Shader code is based on HDRP architecture. / 注：Shader 代码基于 HDRP 架构编写)*
+
+* **Disclaimer (声明):**
+    * This tool has currently **only** been tested on the specific version listed above.
+    * Compatibility with other Unity versions (e.g., Unity 6, 2021 LTS) or other Graphics APIs (Vulkan, Metal, OpenGL) is **unknown** and not guaranteed.
+    * 本工具目前**仅**在上述特定版本中进行过测试。
+    * 对于其他 Unity 版本（如 Unity 6, 2021 LTS）或其他图形 API（Vulkan, Metal, OpenGL）的兼容性**未知**，暂不提供保证。
+
 ## Features / 功能特性
 
 * **Real-time Preview:** Visualize 3D noise directly in the Unity Editor before exporting.
