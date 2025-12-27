@@ -1,4 +1,4 @@
-# Unity-VolumeCloudExportTools
+# Unity-3DTextureExportTools
 
 **[English]**
 A lightweight, robust Unity Editor tool for generating, previewing, and exporting 3D Noise Textures (Volume Textures) specifically designed for Volumetric Cloud rendering.
